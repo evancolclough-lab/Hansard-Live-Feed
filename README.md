@@ -92,8 +92,13 @@ assets/app.js                           — polling, backspace reconstruction, s
                                            persistence, scroll behaviour, theme toggle
 data/latest-hansard.json                — latest official Hansard PDF reference (auto-updated)
 scripts/update_latest_hansard.py        — scraper run by the workflow below
-scripts/requirements.txt                — scraper's Python deps
-.github/workflows/update-latest-hansard.yml — runs the scraper every 30 min
+scripts/requirements.txt                — Python deps for both scripts below
+.github/workflows/update-latest-hansard.yml — runs the Hansard-PDF scraper every 30 min
+
+transcripts/<YYYY-MM-DD>.txt            — one full day's archived transcript (optional feature, auto-created)
+scripts/archive_daily_transcript.py     — nightly full-day transcript fetch + archive
+scripts/google-apps-script/archive-transcript.gs — paste-in source for the Sheets webhook (not deployed via git)
+.github/workflows/archive-daily-transcript.yml — runs the nightly archive job
 ```
 
 ## Local development
@@ -146,12 +151,13 @@ This overwrites `data/latest-hansard.json` with freshly scraped data.
    "Read and write permissions" is enabled — the update workflow commits
    back to the repo (`permissions: contents: write` is already declared in
    the workflow file, but the repo-level default also needs to allow it).
-4. That's it — no secrets, no environment variables, nothing to configure.
-   The scheduled workflow starts running on its own (GitHub may delay the
-   very first scheduled run by a few minutes to a few hours after a repo
-   goes public/active; you can also trigger it immediately from the
-   **Actions** tab via "Run workflow", since it's set up with
-   `workflow_dispatch` too).
+4. That's it for the core site — no secrets, no environment variables,
+   nothing to configure. The scheduled workflow starts running on its own
+   (GitHub may delay the very first scheduled run by a few minutes to a
+   few hours after a repo goes public/active; you can also trigger it
+   immediately from the **Actions** tab via "Run workflow", since it's set
+   up with `workflow_dispatch` too). The optional daily transcript archive
+   below does need two secrets if you want it.
 5. Open `assets/app.js` and update the `REPO_URL` constant near the top to
    point at your actual repo, so the footer's "Source on GitHub" link is
    correct.
@@ -165,6 +171,64 @@ should keep working across Assemblies/Sessions without any manual update.
 (`assembly-65-session-1` as of this writing) used only if that
 auto-detection ever fails — there's a `TODO` comment right above it flagging
 where to bump it if that ever happens.
+
+## Daily transcript archive (optional)
+
+Everything above is the core project and needs nothing further. This
+section adds one more piece: a nightly job that saves each sitting day's
+**full** transcript permanently — not just in a visitor's browser — and
+logs it to a Google Sheet.
+
+**Why this exists / how it differs from the live feature:** the live
+transcript only ever accumulates inside whichever visitor's browser has
+the page open (that's inherent to the "100% static, no server" design —
+see the CORS notes above). Nothing server-side ever sees a *complete*
+day's transcript on its own. `.github/workflows/archive-daily-transcript.yml`
+fixes that with one scheduled job per day, timed for after the House
+would realistically have risen. It calls the captions endpoint with
+`last=0`, which — per StreamText's documented behaviour — hands back
+*everything* captioned that day in one response, so a single end-of-day
+fetch is enough; no continuous server-side polling needed. On a day with
+no sitting it detects that (empty content) and skips entirely — no empty
+file, no Sheet row, no commit.
+
+**Where the data ends up:**
+- The full transcript is committed to `transcripts/<YYYY-MM-DD>.txt` in
+  this repo — versioned, diffable, no size limit, and it turns this repo
+  into a browsable archive of every past sitting day, not just today's.
+- A Google Sheet gets one summary row per day (date, sitting/pages if
+  available, word/char counts, and a link to the file above). The full
+  text intentionally isn't crammed into the Sheet itself — a single
+  Sheets cell caps out at 50,000 characters, which a full sitting day's
+  transcript can plausibly exceed. The Sheet is a lightweight index
+  pointing at the real files, not the storage itself.
+
+### Setup
+
+1. **Create the Sheet-side webhook.** Open (or create) the Google Sheet
+   you want the daily log in, then follow the setup steps at the top of
+   [`scripts/google-apps-script/archive-transcript.gs`](scripts/google-apps-script/archive-transcript.gs) —
+   paste that file into Extensions → Apps Script, set a script property
+   for a shared secret, and deploy it as a Web App. You'll end up with two
+   values: the deployed `/exec` URL, and the random secret string you
+   picked.
+2. **Add two GitHub repository secrets** — **Settings → Secrets and
+   variables → Actions → New repository secret**:
+   - `SHEETS_WEBHOOK_URL` — the Apps Script `/exec` URL from step 1.
+   - `SHEETS_WEBHOOK_TOKEN` — the same shared-secret string from step 1.
+3. Done. The workflow already has `permissions: contents: write` for its
+   own commit step (same as the Hansard-PDF workflow), runs nightly on its
+   own schedule, and can be triggered manually from the **Actions** tab to
+   test it (`workflow_dispatch`) without waiting for the actual schedule —
+   though a manual run outside sitting hours will just correctly report
+   "no content" and skip, same as the schedule would.
+
+If you skip this whole section, the rest of the site is completely
+unaffected — the live transcript, search, download, and Hansard PDF card
+all work exactly the same either way. Without the two secrets set, the
+workflow's notify step just logs that it's skipping and exits cleanly
+(the transcript still gets archived to the repo either way — only the
+Sheet row is skipped).
 
 ## Design notes
 

@@ -1,0 +1,72 @@
+name: Archive daily transcript
+
+on:
+  schedule:
+    # 03:00 UTC daily. That's 23:00 AST (winter) / 00:00 ADT (summer)
+    # Atlantic time — comfortably after any realistic House sitting has
+    # risen for the day, in either DST state, without needing to compute
+    # DST here (the script itself resolves "today" against Atlantic time
+    # for the filename/date, independent of when this cron actually fires).
+    - cron: "0 3 * * *"
+  workflow_dispatch: {} # allow manual runs from the Actions tab, e.g. to test
+
+permissions:
+  contents: write
+
+concurrency:
+  group: archive-daily-transcript
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Fetch and reconstruct today's transcript
+        id: archive
+        run: python scripts/archive_daily_transcript.py
+
+      - name: Commit transcript file
+        if: steps.archive.outputs.has_content == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "transcripts/${{ steps.archive.outputs.date }}.txt"
+          git commit -m "chore: archive transcript for ${{ steps.archive.outputs.date }}"
+          git push
+
+      - name: Notify Google Sheet
+        if: steps.archive.outputs.has_content == 'true'
+        env:
+          SHEETS_WEBHOOK_URL: ${{ secrets.SHEETS_WEBHOOK_URL }}
+          SHEETS_WEBHOOK_TOKEN: ${{ secrets.SHEETS_WEBHOOK_TOKEN }}
+        run: |
+          if [ -z "$SHEETS_WEBHOOK_URL" ]; then
+            echo "SHEETS_WEBHOOK_URL secret not set — skipping Sheets notification (transcript file was still archived to the repo above)."
+            exit 0
+          fi
+
+          FILE_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/transcripts/${{ steps.archive.outputs.date }}.txt"
+
+          curl -sS -X POST "$SHEETS_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+                --arg token "$SHEETS_WEBHOOK_TOKEN" \
+                --arg date "${{ steps.archive.outputs.date }}" \
+                --arg sitting "${{ steps.archive.outputs.sitting }}" \
+                --arg pages "${{ steps.archive.outputs.pages }}" \
+                --arg wordCount "${{ steps.archive.outputs.word_count }}" \
+                --arg charCount "${{ steps.archive.outputs.char_count }}" \
+                --arg fileUrl "$FILE_URL" \
+                --arg archivedAt "${{ steps.archive.outputs.archived_at }}" \
+                '{token: $token, date: $date, sitting: $sitting, pages: $pages, wordCount: $wordCount, charCount: $charCount, fileUrl: $fileUrl, archivedAt: $archivedAt}')"
