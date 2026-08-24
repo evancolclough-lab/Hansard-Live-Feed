@@ -1,0 +1,59 @@
+name: Update latest Hansard PDF reference
+
+on:
+  schedule:
+    # Every 30 minutes. New Hansard PDFs are published at most once per
+    # sitting day, so this is comfortably frequent without hammering the
+    # source site. GitHub's scheduler doesn't guarantee exact timing under
+    # load, which is fine here.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-latest-hansard
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Snapshot previous content (ignoring checkedAt)
+        id: before
+        run: |
+          if [ -f data/latest-hansard.json ]; then
+            HASH=$(jq -S 'del(.checkedAt)' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
+          else
+            HASH="none"
+          fi
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Run scraper
+        run: python scripts/update_latest_hansard.py
+
+      - name: Commit only if the Hansard reference actually changed
+        run: |
+          NEW_HASH=$(jq -S 'del(.checkedAt)' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
+          if [ "$NEW_HASH" = "${{ steps.before.outputs.hash }}" ]; then
+            echo "No substantive change (sitting/date/pages/pdfUrl unchanged) — skipping commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/latest-hansard.json
+          git commit -m "chore: update latest Hansard PDF reference"
+          git push

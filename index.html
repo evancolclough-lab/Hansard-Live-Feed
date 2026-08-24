@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NS Hansard Live &mdash; Nova Scotia House of Assembly Live Transcript</title>
+<meta name="description" content="A continuously-updating, unofficial live transcript of Nova Scotia House of Assembly proceedings, with search and download, plus a link to the latest official Hansard PDF.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%9C%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<a class="skip-link" href="#transcript">Skip to transcript</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">🏛️</span>
+      <div class="brand-text">
+        <h1>NS Hansard Live</h1>
+        <p class="brand-sub">Nova Scotia House of Assembly &mdash; live transcript</p>
+      </div>
+    </div>
+
+    <div class="status-cluster">
+      <span id="statusBadge" class="status-badge status-connecting" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusLabel">Connecting&hellip;</span>
+      </span>
+      <span id="lastUpdated" class="last-updated">&nbsp;</span>
+      <button id="themeToggle" class="icon-btn" type="button" aria-label="Toggle light/dark mode" title="Toggle light/dark mode">
+        <span id="themeToggleIcon" aria-hidden="true">🌙</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<div class="toolbar">
+  <div class="toolbar-inner">
+    <div class="search-field">
+      <span class="search-icon" aria-hidden="true">🔎</span>
+      <input id="searchInput" type="search" placeholder="Search the transcript&hellip;" aria-label="Search the transcript" autocomplete="off">
+      <span id="searchCount" class="search-count" aria-live="polite"></span>
+      <div class="search-nav">
+        <button id="searchPrev" class="icon-btn small" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)" disabled>▲</button>
+        <button id="searchNext" class="icon-btn small" type="button" aria-label="Next match" title="Next match (Enter)" disabled>▼</button>
+      </div>
+    </div>
+    <button id="downloadBtn" class="btn" type="button">
+      <span aria-hidden="true">⬇</span> Download Transcript
+    </button>
+  </div>
+</div>
+
+<main class="layout">
+  <section class="transcript-panel" aria-label="Live transcript">
+    <div class="disclaimer">
+      <strong>Unofficial live transcript.</strong> This text is generated automatically from the Legislature's live captioning feed in real time and may contain errors, omissions, or misattributions. It is <em>not</em> the official record. The published Hansard PDF (see sidebar) is the official record of proceedings.
+    </div>
+
+    <div id="loadingNotice" class="loading-notice" hidden>
+      Loading today&rsquo;s transcript&hellip; this can take a moment if the sitting has been underway for a while.
+    </div>
+
+    <div id="transcript" class="transcript-text" tabindex="0" aria-label="Transcript text"></div>
+
+    <div id="emptyState" class="empty-state">
+      <p>📭 No transcript yet today.</p>
+      <p class="empty-state-sub">The House isn&rsquo;t currently sitting, or captioning hasn&rsquo;t started. This page will pick it up automatically once it does &mdash; no need to refresh.</p>
+    </div>
+
+    <button id="jumpLatest" class="jump-latest" type="button" hidden>
+      ↓ Jump to latest
+    </button>
+  </section>
+
+  <aside class="sidebar">
+    <div class="card hansard-card">
+      <h2>Latest Hansard <span class="card-sub">(official PDF)</span></h2>
+      <div id="hansardCardBody" class="hansard-card-body">
+        <p class="muted">Loading&hellip;</p>
+      </div>
+    </div>
+
+    <div class="card about-card">
+      <h2>About this page</h2>
+      <p>
+        The live transcript above is reconstructed client-side from
+        <a href="https://www.streamtext.net/player?event=NSLegislature" target="_blank" rel="noopener">StreamText&rsquo;s public captioning feed</a>
+        for the Nova Scotia House of Assembly, polled every 5 seconds directly from your browser. Nothing is sent to a server &mdash;
+        your copy of the transcript lives only in this browser tab (and its local storage, so a refresh won&rsquo;t lose today&rsquo;s text).
+      </p>
+      <p>
+        For the authoritative record, always refer to the official Hansard PDF, published after each sitting by the
+        <a href="https://nslegislature.ca/legislative-business/hansard-debates" target="_blank" rel="noopener">Nova Scotia Legislature</a>.
+      </p>
+      <p class="muted small">No accounts, API keys, or logins are used anywhere on this page &mdash; both data sources are public.</p>
+    </div>
+  </aside>
+</main>
+
+<footer class="site-footer">
+  <p>
+    Not affiliated with the Nova Scotia House of Assembly. Live captions courtesy of
+    <a href="https://streamtext.net" target="_blank" rel="noopener">StreamText.net</a>.
+    Source on <a id="repoLink" href="#" target="_blank" rel="noopener">GitHub</a>.
+  </p>
+</footer>
+
+<script src="assets/app.js"></script>
+</body>
+</html>
