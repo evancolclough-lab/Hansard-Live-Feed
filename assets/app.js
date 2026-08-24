@@ -25,7 +25,7 @@
   const BACKSPACE = "\x08";
   const STORAGE_PREFIX = "nsHansardLive:v1:";
   const ATLANTIC_TZ = "America/Halifax";
-  const REPO_URL = "https://github.com/"; // TODO: set to this repo's URL once pushed to GitHub
+  const REPO_URL = "https://github.com/evancolclough-lab/Hansard-Live-Feed";
 
   // ---------------------------------------------------------
   // DOM refs
