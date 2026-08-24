@@ -116,6 +116,25 @@ pip install -r scripts/requirements.txt
 python3 scripts/update_latest_hansard.py
 ```
 
+### Test mode
+
+The House isn't sitting most of the time, which makes the live-transcript
+feature hard to actually see working. Append `?testmode=1` to the URL
+(e.g. `http://localhost:8000/index.html?testmode=1`, or on the deployed
+site) to feed a simulated caption script through the *exact same*
+accumulation/render/scroll code real polling uses, instead of contacting
+StreamText. It demonstrates streaming text, a live backspace
+self-correction, auto-scroll, the "jump to latest" button, search, and
+the `.txt` download (labelled as simulated in its own header) — all
+without needing a real sitting.
+
+A purple banner marks the page as being in test mode the whole time, with
+an "Exit test mode" link that drops the query param and returns to the
+real feed. Test-mode content is in-memory only — it's never written to
+the real day's localStorage entry, and reloading without `?testmode=1`
+shows the real (usually empty, outside sitting hours) transcript exactly
+as before, untouched.
+
 This overwrites `data/latest-hansard.json` with freshly scraped data.
 
 ## Deploying to GitHub Pages

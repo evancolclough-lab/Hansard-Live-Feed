@@ -121,6 +121,20 @@ a { color: var(--link); }
   z-index: 40;
 }
 
+/* Deliberately a fixed colour rather than a theme token — this needs to
+   read as "something unusual is happening" in both light and dark mode
+   alike, and stay visually distinct from the green/amber LIVE/idle status
+   colours so it can never be mistaken for a real connection state. */
+.test-mode-banner {
+  background: #7c3aed;
+  color: #ffffff;
+  text-align: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+}
+.test-mode-banner a { color: #fff; margin-left: 0.5rem; }
+
 .topbar {
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
