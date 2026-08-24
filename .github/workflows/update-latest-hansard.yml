@@ -31,11 +31,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r scripts/requirements.txt
 
-      - name: Snapshot previous content (ignoring checkedAt)
+      - name: Snapshot previous content (ignoring checkedAt and pdfUrl's cache-busting query string)
         id: before
         run: |
+          # Drupal appends a "?<random>" cache-buster to pdfUrl that changes
+          # on effectively every scrape even when the PDF itself hasn't —
+          # comparing pdfUrl as-is defeated the whole point of this hash
+          # check (every run looked like "content changed"). Stripping the
+          # query string before hashing means only a genuinely different
+          # sitting/date/pages/PDF triggers a commit; the real pdfUrl
+          # (with its cache-buster) is still written to the file untouched.
           if [ -f data/latest-hansard.json ]; then
-            HASH=$(jq -S 'del(.checkedAt)' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
+            HASH=$(jq -S 'del(.checkedAt) | .pdfUrl |= sub("\\?.*$"; "")' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
           else
             HASH="none"
           fi
@@ -46,9 +53,9 @@ jobs:
 
       - name: Commit only if the Hansard reference actually changed
         run: |
-          NEW_HASH=$(jq -S 'del(.checkedAt)' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
+          NEW_HASH=$(jq -S 'del(.checkedAt) | .pdfUrl |= sub("\\?.*$"; "")' data/latest-hansard.json | sha256sum | cut -d' ' -f1)
           if [ "$NEW_HASH" = "${{ steps.before.outputs.hash }}" ]; then
-            echo "No substantive change (sitting/date/pages/pdfUrl unchanged) — skipping commit."
+            echo "No substantive change (sitting/date/pages/pdfUrl unchanged, ignoring its cache-busting query string) — skipping commit."
             exit 0
           fi
 
