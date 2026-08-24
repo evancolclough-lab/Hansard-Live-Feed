@@ -336,6 +336,19 @@ a { color: var(--link); }
   outline: none;
 }
 
+/* Only boxed-and-scrollable once there's actual text — see
+   updateEmptyStateVisibility() in app.js, which toggles this class. Without
+   that gate, an empty transcript would render as a tall blank box sitting
+   right above the "No transcript yet today" message instead of just that
+   message on its own. */
+.transcript-text.has-content {
+  height: 65vh;
+  min-height: 320px;
+  max-height: 640px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 .transcript-text mark {
   background: var(--mark-bg);
   color: inherit;
@@ -361,10 +374,14 @@ a { color: var(--link); }
 .empty-state-sub { font-size: 0.85rem; max-width: 40ch; margin-block: 0.5rem 0; margin-inline: auto; }
 
 .jump-latest {
-  position: sticky;
-  bottom: 1rem;
-  left: 100%;
-  transform: translateX(-1.2rem);
+  /* Floats over the bottom-right corner of the scrollable transcript box
+     itself (positioned against .transcript-panel, its nearest positioned
+     ancestor) rather than the page — it needs to stay anchored to the box
+     whose scroll position it controls, not to the viewport. */
+  position: absolute;
+  bottom: 1.1rem;
+  right: 1.2rem;
+  z-index: 5;
   display: none;
   background: var(--accent);
   color: var(--accent-ink);
@@ -375,8 +392,6 @@ a { color: var(--link); }
   font-weight: 600;
   cursor: pointer;
   box-shadow: var(--shadow);
-  margin-bottom: 1rem;
-  margin-right: 1.2rem;
 }
 .jump-latest.visible { display: inline-flex; }
 
@@ -457,6 +472,7 @@ a { color: var(--link); }
   .brand-text h1 { font-size: 0.95rem; }
   .brand-sub { display: none; }
   .transcript-text { font-size: 1.02rem; padding: 1.1rem 1rem 1.6rem; }
+  .transcript-text.has-content { height: 55vh; min-height: 260px; }
   .btn span[aria-hidden] { display: inline; }
   .btn { padding: 0.55rem 0.8rem; }
 }

@@ -310,20 +310,18 @@
   function updateEmptyStateVisibility() {
     const hasText = state.chars.length > 0;
     el.emptyState.style.display = hasText ? "none" : (state.firstPollDone ? "block" : "none");
+    // The transcript box is only given a fixed height + its own scrollbar
+    // once there's text to scroll through — see .transcript-text.has-content
+    // in style.css. Without this gate an empty transcript would render as a
+    // tall blank box sitting right above the "No transcript yet today"
+    // message instead of just that message on its own.
+    el.transcript.classList.toggle("has-content", hasText);
   }
 
   function renderTranscript() {
-    // On the very first paint the transcript element is still empty, so the
-    // "am I near the bottom" heuristic is meaningless (a near-empty page is
-    // trivially "near its own bottom"). If there's already restored/
-    // backfilled text at that point, treat first paint as "was at bottom"
-    // so it opens at the latest text; the real heuristic takes over from
-    // the second render on. But with nothing restored (a fresh visit with
-    // an empty transcript), there's nothing to scroll to — forcing a
-    // scroll then would nudge the page down by a few stray pixels of
-    // padding and push page content up underneath the sticky header. So
-    // skip the heuristic (and the scroll) entirely while there's no
-    // content yet.
+    // On the very first paint there's nothing to scroll to yet if the
+    // transcript is empty; once there is content (restored from
+    // localStorage, or freshly arrived), open scrolled to the latest text.
     const hasContent = state.chars.length > 0;
     const wasNearBottom = hasContent && (!state.firstRenderDone || isNearTranscriptBottom());
     state.firstRenderDone = true;
@@ -393,18 +391,19 @@
 
   // ---------------------------------------------------------
   // Auto-scroll / jump to latest
+  // The transcript is its own internally-scrolling box (.has-content in
+  // style.css) rather than growing the whole page, so all of this tracks
+  // the box's own scrollTop/scrollHeight — not window.scrollY — and the
+  // rest of the page (sidebar, footer) stays reachable via normal page
+  // scroll no matter how long the transcript gets.
   // ---------------------------------------------------------
   function isNearTranscriptBottom() {
-    const rect = el.transcript.getBoundingClientRect();
-    const bottomOfTranscript = window.scrollY + rect.bottom;
-    const nearEnough = window.scrollY + window.innerHeight >= bottomOfTranscript - 60;
-    return nearEnough;
+    const t = el.transcript;
+    return t.scrollHeight - t.scrollTop - t.clientHeight < 60;
   }
 
   function scrollToLatest() {
-    const rect = el.transcript.getBoundingClientRect();
-    const targetY = window.scrollY + rect.bottom - window.innerHeight + 40;
-    window.scrollTo({ top: Math.max(targetY, 0), behavior: "auto" });
+    el.transcript.scrollTop = el.transcript.scrollHeight;
     el.jumpLatest.hidden = true;
     el.jumpLatest.classList.remove("visible");
   }
@@ -415,7 +414,7 @@
     el.jumpLatest.classList.toggle("visible", shouldShow);
   }
 
-  window.addEventListener("scroll", () => {
+  el.transcript.addEventListener("scroll", () => {
     state.autoScroll = isNearTranscriptBottom();
     updateJumpButtonVisibility();
   }, { passive: true });
