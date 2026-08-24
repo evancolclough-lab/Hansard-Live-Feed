@@ -338,8 +338,13 @@ a { color: var(--link); }
   text-align: center;
   color: var(--text-muted);
 }
-.empty-state p { margin: 0.3rem 0; }
-.empty-state-sub { font-size: 0.85rem; max-width: 40ch; margin: 0.5rem auto 0; }
+/* margin-block only (not the shorthand) so it doesn't fight
+   .empty-state-sub's margin-inline: auto below on specificity — a plain
+   "margin: 0.3rem 0" here would win the cascade (.empty-state p has
+   higher specificity than .empty-state-sub) and silently zero out the
+   auto centering on the sub-line. */
+.empty-state p { margin-block: 0.3rem; }
+.empty-state-sub { font-size: 0.85rem; max-width: 40ch; margin-block: 0.5rem 0; margin-inline: auto; }
 
 .jump-latest {
   position: sticky;
