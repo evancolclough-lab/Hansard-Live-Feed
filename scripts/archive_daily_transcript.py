@@ -1,15 +1,27 @@
 #!/usr/bin/env python3
 """
-Fetches the *entire* current day's live-caption transcript from StreamText
-in one shot (last=0 returns full backfill for the day, per StreamText's own
-documented behaviour — see README's CORS/verification notes), and writes it
-to transcripts/<date>.txt for the workflow to commit.
+Fetches the day's live-caption transcript from StreamText's live text feed in
+one request and writes it to transcripts/<date>.txt for the workflow to commit.
 
-Run once nightly by .github/workflows/archive-daily-transcript.yml, well
-after the House would realistically have risen for the day. On a day with
-no sitting, this exits cleanly without writing anything or touching the
-Sheet — see GITHUB_OUTPUT's has_content flag, which the workflow checks
-before its commit/notify steps.
+Which feed, and why: StreamText has two. The documented /captions endpoint
+returns the backlog in tiny pages (roughly 10-35 characters per request), so
+a single call to it would capture only the first few words of the day — the
+original version of this script did exactly that. text-data.ashx (the feed
+StreamText's own player uses) returns the entire backlog for last=0 in one
+response, as a list of entries whose text is percent-encoded; "%08" is the
+captioner's backspace. The live site reads the same feed.
+
+Run by .github/workflows/archive-daily-transcript.yml in the evening, after
+the House would realistically have risen. On a day with no captioning
+session StreamText answers 404 ("Event not found"); this script then exits
+cleanly without writing anything — see GITHUB_OUTPUT's has_content flag,
+which the workflow checks before its commit/notify steps.
+
+Known limit: the feed only holds the *current* session. If StreamText drops
+the event once the captioner disconnects, or a second session starts later
+the same day, only what is still available when this runs can be archived.
+That's why the workflow runs more than once an evening: a later run only
+replaces the day's file when it actually finds content.
 
 This script does NOT talk to Google Sheets directly and does NOT commit to
 git — see the workflow file for that. It only: fetches, reconstructs,
@@ -19,10 +31,13 @@ writes the local file, and reports outputs for later workflow steps.
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 try:
     from zoneinfo import ZoneInfo
@@ -32,7 +47,7 @@ except Exception:  # pragma: no cover
     ATLANTIC = timezone(timedelta(hours=-3))
 
 EVENT_NAME = "NSLegislature"
-CAPTIONS_URL = f"https://www.streamtext.net/captions?event={EVENT_NAME}&last=0&language=en"
+FEED_URL = f"https://www.streamtext.net/text-data.ashx?event={EVENT_NAME}&last=0"
 BACKSPACE = "\x08"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -42,6 +57,39 @@ LATEST_HANSARD_PATH = REPO_ROOT / "data" / "latest-hansard.json"
 HEADERS = {
     "User-Agent": "ns-hansard-dashboard-bot/1.0 (public data updater; see repo README)"
 }
+
+
+def make_session() -> requests.Session:
+    """A session that retries transient failures. A single hiccup shouldn't
+    cost us the whole day: there is no second chance until the next run."""
+    session = requests.Session()
+    retry = Retry(
+        total=4,
+        backoff_factor=2,  # a growing pause between attempts (seconds to tens of seconds)
+        status_forcelist=(500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+def decode_entries(entries: list) -> str:
+    """Join the feed's entries into raw text. Each entry's `d` is
+    percent-encoded UTF-8. Only plain-text ("basic") entries are used — same
+    rule as the live site — so other formats (e.g. speech-recognition text)
+    can't pollute the transcript."""
+    parts = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("d")
+        if not isinstance(encoded, str):
+            continue
+        fmt = entry.get("format")
+        if fmt and fmt != "basic":
+            continue
+        parts.append(unquote(encoded, errors="replace"))
+    return "".join(parts)
 
 
 def apply_backspaces(content: str) -> str:
@@ -57,42 +105,41 @@ def apply_backspaces(content: str) -> str:
     return "".join(chars)
 
 
-def fetch_full_day_transcript() -> tuple[str, bool]:
-    """Returns (transcript_text, had_content). had_content is False on a
-    non-sitting day (StreamText returns a negative/absent lastPosition or
-    literally no content for the event that day)."""
-    resp = requests.get(CAPTIONS_URL, headers=HEADERS, timeout=30)
-    # StreamText returns JSON even on a 404 ("event not found" / idle day),
-    # so parse the body regardless of status rather than branching on it —
-    # matches the frontend's own handling.
-    try:
-        data = resp.json()
-    except (json.JSONDecodeError, ValueError):
-        return "", False
+def fetch_full_transcript(session: requests.Session) -> tuple[str, bool]:
+    """Returns (transcript_text, had_content). had_content is False when no
+    captioning session is active (404) or the session has no text yet.
 
-    last_position = data.get("lastPosition")
-    if not isinstance(last_position, (int, float)) or last_position < 0:
-        return "", False
+    Anything else unexpected — an HTTP error that outlasted the retries, or
+    a 200 that isn't the feed's JSON — raises, so the workflow run fails
+    visibly. Quietly skipping would mean silently losing a sitting day."""
+    resp = session.get(FEED_URL, headers=HEADERS, timeout=(10, 60))
+    if resp.status_code == 404:
+        return "", False  # "Event not found": what every non-sitting day looks like
+    resp.raise_for_status()
 
-    content = data.get("content") or ""
-    transcript = apply_backspaces(content)
+    data = resp.json()
+    entries = data.get("i") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("Unexpected feed response: no entry list in the JSON")
+
+    transcript = apply_backspaces(decode_entries(entries))
     return transcript, len(transcript.strip()) > 0
 
 
-def best_effort_sitting_metadata(date_str: str) -> dict:
-    """If data/latest-hansard.json happens to already reference today's
-    sitting (it won't, usually — the official PDF is typically published
-    days after the sitting, not same-day), use its sitting/pages fields.
-    Otherwise leave them blank; not essential, just a nice-to-have."""
-    if not LATEST_HANSARD_PATH.exists():
-        return {"sitting": "", "pages": ""}
+def best_effort_sitting_metadata(day: date) -> dict:
+    """data/latest-hansard.json describes the most recently *published*
+    Hansard, which is normally an earlier sitting (the official PDF usually
+    appears days later). So only use its sitting/pages when its date really
+    is `day`; otherwise leave them blank rather than stamping today's archive
+    with an old sitting's numbers."""
+    blank = {"sitting": "", "pages": ""}
     try:
         data = json.loads(LATEST_HANSARD_PATH.read_text())
-    except json.JSONDecodeError:
-        return {"sitting": "", "pages": ""}
-    # data["date"] looks like "2026-Apr-9" — not the same format as our
-    # YYYY-MM-DD date_str, and matching them reliably isn't worth the
-    # complexity here given it'll rarely line up same-day anyway.
+        published = datetime.strptime(data["date"], "%Y-%b-%d").date()  # e.g. "2026-Apr-9"
+    except (OSError, ValueError, KeyError, TypeError):
+        return blank
+    if published != day:
+        return blank
     return {"sitting": data.get("sitting", ""), "pages": data.get("pages", "")}
 
 
@@ -109,7 +156,7 @@ def main() -> int:
     now = datetime.now(ATLANTIC)
     date_str = now.strftime("%Y-%m-%d")
 
-    transcript, had_content = fetch_full_day_transcript()
+    transcript, had_content = fetch_full_transcript(make_session())
 
     if not had_content:
         print(f"No transcript content for {date_str} — House likely wasn't sitting. Skipping.")
@@ -119,7 +166,7 @@ def main() -> int:
     TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = TRANSCRIPTS_DIR / f"{date_str}.txt"
 
-    meta = best_effort_sitting_metadata(date_str)
+    meta = best_effort_sitting_metadata(now.date())
     header = "\n".join([
         "NOVA SCOTIA HOUSE OF ASSEMBLY — UNOFFICIAL DAILY TRANSCRIPT ARCHIVE",
         f"Source: StreamText.net live captioning feed (event=\"{EVENT_NAME}\")",
