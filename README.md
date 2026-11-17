@@ -4,7 +4,7 @@ A live, continuously-updating (unofficial) transcript of Nova Scotia House of
 Assembly proceedings, plus a link to the latest officially published Hansard
 PDF. Static site, no backend, no accounts, no API keys.
 
-**Live transcript** — reconstructed client-side, every 5 seconds, from
+**Live transcript** — reconstructed client-side, about once a second, from
 StreamText's public captioning feed for the House (`event=NSLegislature`).
 **Latest Hansard PDF** — a small sidebar card populated from
 [`data/latest-hansard.json`](data/latest-hansard.json), refreshed every 30
@@ -14,10 +14,11 @@ listing page.
 ## How it works
 
 ```
-┌─────────────────────┐        every 5s, client-side          ┌───────────────────────┐
-│ visitor's browser    │ ───────────────────────────────────▶ │ streamtext.net/captions│
-│ (index.html + app.js)│ ◀─────────────────────────────────── │ (CORS-open, public)    │
-└─────────────────────┘        {content, lastPosition}        └───────────────────────┘
+┌─────────────────────┐       ~every 1s, client-side          ┌───────────────────────┐
+│ visitor's browser    │ ───────────────────────────────────▶ │ streamtext.net/        │
+│ (index.html + app.js)│ ◀─────────────────────────────────── │   text-data.ashx       │
+└─────────────────────┘     {lastPosition, i:[entries]}        │ (CORS-open, public)    │
+                                                                 └───────────────────────┘
 
 ┌─────────────────────┐   same-origin fetch of committed file  ┌───────────────────────┐
 │ visitor's browser    │ ───────────────────────────────────▶ │ data/latest-hansard.json│
@@ -37,7 +38,10 @@ Tested 2026-08-24, a non-sitting day, from the CLI and from a real browser
 tab pointed at the official `streamtext.net/player?event=NSLegislature`
 page.
 
-1. **CORS on `streamtext.net/captions`**: **open**. `curl -I` with an
+1. **CORS on StreamText's feeds**: **open** — `/captions` (tested
+   2026-08-24) and `/text-data.ashx`, the feed the site actually uses now
+   (tested 2026-11-17, for both its `200` and its `404` responses; see
+   finding 4). `curl -I` with an
    `Origin` header gets back `access-control-allow-origin: <the origin sent>`
    (it reflects any origin) and `vary: origin`. This is a simple GET with no
    custom headers, so no preflight is triggered — a plain client-side
@@ -59,11 +63,12 @@ page.
    watching the real player's own network calls to its actual endpoint
    (`text-data.ashx`, which 404s with a plain-text `Event not found` body
    on an idle day) — same underlying behaviour, different endpoint.
-   We could not observe the live/in-session response shape directly since
-   testing happened outside sitting hours; the documented shape from the
-   brief (`{"content": "...", "lastPosition": N}`) is what the polling and
-   backspace-handling code targets, and it degrades safely (falls back to
-   the idle state) if a response doesn't match.
+   This first pass could not observe a live session, and that mattered:
+   the brief's assumption that `last=0` returns the whole day's backlog
+   turned out to be wrong for `/captions` — see finding 4, which corrects
+   it. (Idle behaviour of `text-data.ashx` is the same shape of thing:
+   `404` with a plain-text `Event not found`, which the site treats as
+   "not currently sitting", not as an error.)
 
 3. **Hansard listing page structure**: confirmed current. Fetched
    `https://nslegislature.ca/legislative-business/hansard-debates/assembly-65-session-1`
@@ -83,6 +88,41 @@ page.
    dropdown first and only falls back to a hardcoded URL if the markup
    ever changes underneath it.
 
+4. **Live-session behaviour (verified 2026-11-17, during a real
+   captioned committee meeting) — and a correction to the original
+   brief.** This is the one that caused the site to run badly behind a
+   live captioner.
+   - **`/captions` pages the backlog in tiny chunks.** The brief assumed
+     `last=0` "hands back everything captioned so far that day in one
+     large chunk". It doesn't: each call returns roughly 10–35
+     *characters* and a cursor to continue from. Against a stream that
+     already held ~10,800 characters, catching up at one chunk per
+     5-second poll would take over half an hour — and a captioner
+     produces text (~12 characters/second here) faster than that
+     drains it, so the page fell *further* behind all sitting. The
+     original site polled this endpoint every 5 seconds.
+   - **`/text-data.ashx` returns the whole backlog in one response.**
+     It's the endpoint StreamText's own player uses. `last=0` returned
+     all 1,138 entries (12,821 characters, matching `/captions`' own
+     character total for the same moment) in a single ~140 ms request.
+     Each entry is `{"format":"basic","d":"<percent-encoded text>"}`;
+     `%08` is the captioner's backspace. The cursor counts *entries*, not
+     characters. `last=-1` returns just the current total, and a cursor
+     past the end is simply echoed back with no entries (so a stale
+     cursor can't be detected from a normal poll — the site probes with
+     `last=-1` when it's been quiet).
+   - **StreamText's own player polls every 500 ms**, with a linear
+     back-off capped at 10 s (read from its `streamtext-player-app.js`).
+     The site now polls about once a second (3 s while idle).
+   - **A session can end and a new one can start with its numbering
+     reset**, which is why the site re-verifies its cursor against the
+     full backlog on page load and after any "event not found", keeping
+     the earlier session's text and marking the join with a divider.
+   - **Not verified:** what StreamText does with the feed *after* a
+     session ends (does it 404 straight away, or keep the day's text?),
+     and whether a second session on the same day really restarts the
+     numbering. Both matter for the daily archive below.
+
 ## Repo layout
 
 ```
@@ -96,9 +136,9 @@ scripts/requirements.txt                — Python deps for both scripts below
 .github/workflows/update-latest-hansard.yml — runs the Hansard-PDF scraper every 30 min
 
 transcripts/<YYYY-MM-DD>.txt            — one full day's archived transcript (optional feature, auto-created)
-scripts/archive_daily_transcript.py     — nightly full-day transcript fetch + archive
+scripts/archive_daily_transcript.py     — full-day transcript fetch + archive (evening)
 scripts/google-apps-script/archive-transcript.gs — paste-in source for the Sheets webhook (not deployed via git)
-.github/workflows/archive-daily-transcript.yml — runs the nightly archive job
+.github/workflows/archive-daily-transcript.yml — runs the archive job twice each evening
 ```
 
 ## Local development
@@ -121,6 +161,8 @@ pip install -r scripts/requirements.txt
 python3 scripts/update_latest_hansard.py
 ```
 
+This overwrites `data/latest-hansard.json` with freshly scraped data.
+
 ### Test mode
 
 The House isn't sitting most of the time, which makes the live-transcript
@@ -139,8 +181,6 @@ real feed. Test-mode content is in-memory only — it's never written to
 the real day's localStorage entry, and reloading without `?testmode=1`
 shows the real (usually empty, outside sitting hours) transcript exactly
 as before, untouched.
-
-This overwrites `data/latest-hansard.json` with freshly scraped data.
 
 ## Deploying to GitHub Pages
 
@@ -175,22 +215,43 @@ where to bump it if that ever happens.
 ## Daily transcript archive (optional)
 
 Everything above is the core project and needs nothing further. This
-section adds one more piece: a nightly job that saves each sitting day's
+section adds one more piece: an evening job that saves each sitting day's
 **full** transcript permanently — not just in a visitor's browser — and
 logs it to a Google Sheet.
+
+> **Status: not yet proven against a real sitting day.** It was built on
+> the brief's (wrong — see finding 4) assumption about `/captions`, then
+> corrected to use `text-data.ashx`, which *is* verified to return a whole
+> backlog in one request. What hasn't been observed is how long StreamText
+> keeps that backlog available after a session ends. Run the workflow by
+> hand (**Actions → Archive daily transcript → Run workflow**) while a
+> captioned session is live to see a real archive, and check back after a
+> session has ended to see whether the later runs still find content.
 
 **Why this exists / how it differs from the live feature:** the live
 transcript only ever accumulates inside whichever visitor's browser has
 the page open (that's inherent to the "100% static, no server" design —
 see the CORS notes above). Nothing server-side ever sees a *complete*
 day's transcript on its own. `.github/workflows/archive-daily-transcript.yml`
-fixes that with one scheduled job per day, timed for after the House
-would realistically have risen. It calls the captions endpoint with
-`last=0`, which — per StreamText's documented behaviour — hands back
-*everything* captioned that day in one response, so a single end-of-day
-fetch is enough; no continuous server-side polling needed. On a day with
-no sitting it detects that (empty content) and skips entirely — no empty
-file, no Sheet row, no commit.
+fixes that with scheduled runs timed for after the House would
+realistically have risen (about 6:15pm and 11:15pm Atlantic, both safely
+before midnight in either DST state). Each run requests the live feed
+(`text-data.ashx`) with `last=0`, which returns the session's *whole*
+backlog in one response, so no continuous server-side polling is needed.
+There are two runs because the feed only holds the *current* session: the
+early one is a snapshot in case it disappears once the captioner
+disconnects, and the late one catches anything said afterwards. A later run
+only replaces the day's file if it actually finds content, so an empty late
+run never wipes the early snapshot. On a day with no captioning session
+(`404`) it skips entirely — no empty file, no Sheet row, no commit. A
+malformed response or a failure that outlasts its retries fails the run
+loudly (red in the Actions tab) instead of quietly skipping a sitting day.
+
+**Limits to know about:** it archives *one* session per day — whatever the
+feed still holds when a run happens — so if the day had several (say a
+committee in the morning and the House in the afternoon) and the feed
+restarts between them, only the most recent survives. And the day is
+labelled by the Atlantic calendar date when the run happens.
 
 **Where the data ends up:**
 - The full transcript is committed to `transcripts/<YYYY-MM-DD>.txt` in
@@ -217,7 +278,7 @@ file, no Sheet row, no commit.
    - `SHEETS_WEBHOOK_URL` — the Apps Script `/exec` URL from step 1.
    - `SHEETS_WEBHOOK_TOKEN` — the same shared-secret string from step 1.
 3. Done. The workflow already has `permissions: contents: write` for its
-   own commit step (same as the Hansard-PDF workflow), runs nightly on its
+   own commit step (same as the Hansard-PDF workflow), runs twice each evening on its
    own schedule, and can be triggered manually from the **Actions** tab to
    test it (`workflow_dispatch`) without waiting for the actual schedule —
    though a manual run outside sitting hours will just correctly report
@@ -238,13 +299,19 @@ Sheet row is skipped).
   tolerated silently before surfacing a "connection issue" badge, since
   brief network blips shouldn't cause visible flicker).
 - **Persistence** is keyed by the current Atlantic-time date
-  (`localStorage["nsHansardLive:v1:<YYYY-MM-DD>"]`), matching how
-  StreamText scopes a day's captions. A day rollover detected mid-session
-  resets the in-memory buffer and cursor and starts fresh.
-- **Auto-scroll** tracks whether the reader is near the bottom of the
-  transcript specifically (not the whole page, which also has the sidebar
-  and footer below it) and only snaps down automatically when they were
-  already there; otherwise a "Jump to latest" button appears.
+  (`localStorage["nsHansardLive:v2:<YYYY-MM-DD>"]`), matching how
+  StreamText scopes a day's captions. It stores the transcript, the feed
+  cursor, and a fingerprint of the session's opening entries; on every page
+  load the site re-checks that against the live backlog, so a returning
+  visitor only gets the new text appended, never duplicates. (`v2` because
+  the cursor changed from a character count to an entry count when the feed
+  changed; old `v1` saves are discarded.) A day rollover detected
+  mid-session resets the in-memory buffer and cursor and starts fresh.
+- **Auto-scroll** follows the live edge of the transcript box until the
+  reader scrolls up, and stops following (a "Jump to latest" button
+  appears) for as long as they stay there. It's driven by the reader's own
+  scroll, not re-measured on every update, so resizing the window or a
+  phone's keyboard opening can't silently turn it off.
 - **Search** does a plain case-insensitive substring scan (not regex) over
   the accumulated transcript, so special characters in a search query are
   never misinterpreted, and highlights/count/next-prev stay correct as new
