@@ -280,6 +280,18 @@ a { color: var(--link); }
 .btn:hover { filter: brightness(1.08); }
 .btn:active { filter: brightness(0.95); }
 
+/* Secondary button (the letter-case toggle): outlined rather than filled, so
+   the Download button stays the one primary action in the toolbar. */
+.btn.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: calc(0.55rem - 1px) calc(1rem - 1px);
+}
+.btn.btn-ghost:hover { background: var(--bg-sunken); filter: none; }
+.btn.btn-ghost[aria-pressed="true"] { border-color: var(--accent); }
+.btn.btn-ghost #caseIcon { font-weight: 700; letter-spacing: 0.02em; }
+
 /* ---------- Layout ---------- */
 
 .layout {
