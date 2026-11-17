@@ -102,6 +102,9 @@
     hansardCardBody: document.getElementById("hansardCardBody"),
     repoLink: document.getElementById("repoLink"),
     testModeBanner: document.getElementById("testModeBanner"),
+    caseToggle: document.getElementById("caseToggle"),
+    caseIcon: document.getElementById("caseIcon"),
+    caseLabel: document.getElementById("caseLabel"),
   };
   el.repoLink.href = REPO_URL;
 
@@ -118,6 +121,7 @@
     persistTimer: null,
     persistDirty: false,
     warnedFormats: false,
+    caseMode: "sentence",   // 'sentence' (readable) | 'original' (exactly as captioned, ALL CAPS) — see toSentenceCase()
     chars: [],              // accumulated transcript, as an array of characters (fast push/pop for backspace handling)
     firstContentAt: null,   // ms epoch — when today's transcript first received text
     lastContentAt: null,    // ms epoch — last time new (non-empty) content arrived
@@ -507,6 +511,177 @@
   }
 
   // ---------------------------------------------------------
+  // Letter case
+  //
+  // The captioner's software transmits almost everything in CAPITALS
+  // (about 99% of the words in a real session), which is tiring to read for
+  // hours. toSentenceCase() produces a readable view of that text. It is a
+  // pure function of the raw text, so it is simply re-run on every render;
+  // the stored transcript is never altered, and the toggle in the toolbar
+  // switches back to the original at any time.
+  //
+  // What it can and can't do, honestly: it can't *know* what's a name. It
+  // lower-cases words that arrive in capitals, then puts capitals back for
+  //   * the start of a sentence, a new line, and a speaker's turn ("Chair:"),
+  //   * "I" and its contractions (I'm, I'll ...),
+  //   * a list of acronyms (MLA, IWK, NDP ...) and well-known place names,
+  //   * the name after Ms./Mr./Dr./Madam, and after "my name is ..." and
+  //     "MLA for ...".
+  // Words the captioner's software already sent in mixed case ("DeCOSTE",
+  // "MacGillivray", "FTEs") are left exactly as sent. Any other name will
+  // show in lower case — add it to PROPER_CASE below, or use the toggle.
+  // ---------------------------------------------------------
+  const CASE_KEY = "nsHansardLive:case";
+
+  const KEEP_UPPER = new Set([
+    "MLA", "MLAS", "MP", "MPS", "NDP", "PC", "PCS", "HRM", "NSGEU", "NSTU", "NSNU", "NSCC", "NSLC", "NSH", "IWK",
+    "CBC", "CEO", "CFO", "VP", "COVID", "ER", "ICU", "NICU", "MRI", "MRT", "CT", "OB", "OBS", "OBGYN", "FTE", "FTES",
+    "CNE", "UK", "BC", "PEI", "NB", "NL", "RCMP", "WCB", "EHS", "GDP", "HST", "CRA", "TV", "AI", "ID", "FOIPOP",
+  ]);
+
+  const PROPER_CASE = new Map(Object.entries({
+    NOVA: "Nova", SCOTIA: "Scotia", SCOTIAN: "Scotian", SCOTIANS: "Scotians", HALIFAX: "Halifax", DARTMOUTH: "Dartmouth",
+    CANADA: "Canada", CANADIAN: "Canadian", CANADIANS: "Canadians", ONTARIO: "Ontario", QUEBEC: "Quebec",
+    ALBERTA: "Alberta", MANITOBA: "Manitoba", SASKATCHEWAN: "Saskatchewan", NEWFOUNDLAND: "Newfoundland", LABRADOR: "Labrador",
+    MARITIME: "Maritime", MARITIMES: "Maritimes", PICTOU: "Pictou", CLAYTON: "Clayton", VICTORIA: "Victoria",
+    LUNENBURG: "Lunenburg", YARMOUTH: "Yarmouth", CLARE: "Clare", TIMBERLEA: "Timberlea", PROSPECT: "Prospect",
+    ARMDALE: "Armdale", CAPE: "Cape", BRETON: "Breton", SYDNEY: "Sydney", TRURO: "Truro", ANTIGONISH: "Antigonish",
+    ANNAPOLIS: "Annapolis", KENTVILLE: "Kentville", CUMBERLAND: "Cumberland", COLCHESTER: "Colchester",
+    GUYSBOROUGH: "Guysborough", INVERNESS: "Inverness", RICHMOND: "Richmond", SHELBURNE: "Shelburne", QUEENS: "Queens",
+    DIGBY: "Digby", HANTS: "Hants", BEDFORD: "Bedford", SACKVILLE: "Sackville", PRESTON: "Preston", FAIRVIEW: "Fairview",
+    CHESTER: "Chester", WAVERLEY: "Waverley", DALHOUSIE: "Dalhousie", AUSTRALIA: "Australia", IRELAND: "Ireland",
+    NIGERIA: "Nigeria", PHILIPPINES: "Philippines", WALES: "Wales", ZEALAND: "Zealand", ENGLAND: "England",
+    AMERICA: "America", AMERICAN: "American", ACADIAN: "Acadian", AFRICAN: "African", INDIGENOUS: "Indigenous",
+    "MI'KMAQ": "Mi'kmaq", SPEAKER: "Speaker", PREMIER: "Premier",
+    HOUSE: "House", ASSEMBLY: "Assembly", LEGISLATURE: "Legislature",
+    MR: "Mr", MS: "Ms", MRS: "Mrs", DR: "Dr", MADAM: "Madam", MX: "Mx",
+    MONDAY: "Monday", TUESDAY: "Tuesday", WEDNESDAY: "Wednesday", THURSDAY: "Thursday", FRIDAY: "Friday",
+    SATURDAY: "Saturday", SUNDAY: "Sunday", JANUARY: "January", FEBRUARY: "February", MARCH: "March", APRIL: "April",
+    JUNE: "June", JULY: "July", AUGUST: "August", SEPTEMBER: "September", OCTOBER: "October", NOVEMBER: "November",
+    DECEMBER: "December",
+  }));
+
+  // The word right after one of these is a person's name ("MS. FRASER").
+  const TITLES = new Set(["MR", "MS", "MRS", "DR", "MADAM", "MX"]);
+  // Inside a name/place run these stay lower case ("Victoria-the Lakes")...
+  const RUN_PASS_LOWER = new Set(["THE", "OF", "FOR", "IN", "ON", "AT", "TO", "DE", "LA", "LE", "DU"]);
+  // ...and these end the run ("MLA FOR PICTOU CENTRE AND CHAIR OF ...").
+  const RUN_END = new Set(["AND", "OR", "BUT", "WHO", "THAT", "WHICH", "AS", "WITH", "I", "WE", "IS", "ARE", "WAS", "HAVE", "HAS", "THIS", "A", "AN"]);
+  const NAME_RUN_MAX = 4;
+
+  const CASE_TOKEN_RE = /([A-Za-zÀ-ÿ]+(?:['’][A-Za-zÀ-ÿ]+)*)|(\r?\n)|(>>)|([.!?]+(?=[\s"'”’)\]]|$))|(:)|([,;])/g;
+
+  function capitalizeWord(w) {
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }
+
+  function toSentenceCase(text) {
+    let atStart = true;        // the next word begins a sentence
+    let speakerLine = false;   // the current line is a ">> Speaker:" turn
+    let colonSeen = false;     // ...and its label's colon has been passed
+    let lastWasInitial = false; // previous word was a lone initial ("M" in M.R.I.)
+    let lastWasTitle = false;  // previous word was Ms./Mr./Dr. ...
+    let nameRun = 0;           // how many upcoming words to capitalise as part of a name/place
+    const hist = [];           // last few words, upper-cased, to spot "MY NAME IS" / "MLA FOR"
+
+    return text.replace(CASE_TOKEN_RE, (m, word, newline, arrows, terminator, colon, comma, offset, whole) => {
+      if (word !== undefined) {
+        const key = word.toUpperCase().replace(/’/g, "'");
+        const isCaps = word === word.toUpperCase();
+        let out = word; // words already carrying their own case are left exactly as sent
+
+        // A lone letter is an initial, not a word, when it's strung together
+        // with dots ("M.R.I.", "U.S.") — decided from the neighbouring
+        // characters, so the I in "M.R.I." isn't mistaken for the pronoun.
+        const isLetter = (ch) => ch !== undefined && /[A-Za-z]/.test(ch);
+        const dotted = word.length === 1 &&
+          ((whole[offset - 1] === "." && isLetter(whole[offset - 2])) ||
+           (whole[offset + 1] === "." && isLetter(whole[offset + 2])));
+        // "J." in "MR. J. SMITH": an initial too, though not part of a chain.
+        const initial = word.length === 1 && (dotted || (word !== "A" && word !== "I" && whole[offset + 1] === "."));
+
+        if (isCaps) {
+          const inRun = nameRun > 0 && !RUN_END.has(key) && !RUN_PASS_LOWER.has(key);
+          const capNow = atStart || inRun;
+          const base = key.replace(/'S$/, ""); // so "MLA'S" and "SCOTIA'S" find their entries
+          const tail = word.slice(base.length).toLowerCase();
+
+          if (word.length === 1) {
+            if (word === "A" && !dotted) out = atStart ? "A" : "a";
+            else out = word; // "I", and initials such as the M, R, I in M.R.I.
+          } else if (/^I['’][A-Z]+$/.test(word)) {
+            out = "I" + word.slice(1).toLowerCase();
+          } else if (KEEP_UPPER.has(base)) {
+            out = base + tail;
+          } else if (PROPER_CASE.has(base)) {
+            out = PROPER_CASE.get(base) + tail;
+          } else {
+            out = capNow ? capitalizeWord(word.toLowerCase()) : word.toLowerCase();
+          }
+        }
+
+        // A name/place run counts down over the words it capitalises.
+        if (nameRun > 0) {
+          if (RUN_END.has(key)) nameRun = 0;
+          else if (!RUN_PASS_LOWER.has(key)) nameRun--;
+        }
+        hist.push(key);
+        if (hist.length > 3) hist.shift();
+        if (hist.slice(-3).join(" ") === "MY NAME IS" || hist.slice(-2).join(" ") === "MLA FOR") nameRun = NAME_RUN_MAX;
+        lastWasTitle = TITLES.has(key);
+        if (lastWasTitle) nameRun = 1;
+        lastWasInitial = initial;
+        atStart = false;
+        return out;
+      }
+
+      if (newline !== undefined) {
+        atStart = true; speakerLine = false; colonSeen = false; nameRun = 0; lastWasInitial = false; lastWasTitle = false;
+      } else if (arrows !== undefined) {
+        atStart = true; speakerLine = true; colonSeen = false; nameRun = 0; lastWasInitial = false; lastWasTitle = false;
+      } else if (terminator !== undefined) {
+        // "MS." is not the end of a sentence, and neither is the last dot of
+        // an initialism like "M.R.I." — only a real full stop starts a sentence.
+        if (!lastWasTitle && !lastWasInitial) { atStart = true; nameRun = 0; }
+        lastWasInitial = false; lastWasTitle = false;
+      } else if (colon !== undefined) {
+        // the colon ending a ">> Speaker:" label: what follows starts a sentence
+        if (speakerLine && !colonSeen) { colonSeen = true; atStart = true; }
+        nameRun = 0; lastWasInitial = false; lastWasTitle = false;
+      } else if (comma !== undefined) {
+        nameRun = 0; lastWasInitial = false; lastWasTitle = false;
+      }
+      return m;
+    });
+  }
+
+  // The text actually shown (and downloaded): the raw captions, or their
+  // sentence-case rendering, depending on the toolbar toggle.
+  function viewText(raw) {
+    return state.caseMode === "sentence" ? toSentenceCase(raw) : raw;
+  }
+
+  function loadCaseMode() {
+    try {
+      const saved = localStorage.getItem(CASE_KEY);
+      if (saved === "sentence" || saved === "original") state.caseMode = saved;
+    } catch (err) {
+      /* storage unavailable — keep the default */
+    }
+    updateCaseToggleUI();
+  }
+
+  function updateCaseToggleUI() {
+    const sentence = state.caseMode === "sentence";
+    el.caseToggle.setAttribute("aria-pressed", String(sentence));
+    el.caseIcon.textContent = sentence ? "Aa" : "AA";
+    el.caseLabel.textContent = sentence ? "Sentence case" : "As captioned";
+    el.caseToggle.title = sentence
+      ? "Showing sentence case. Click to show the captions exactly as sent (ALL CAPS)."
+      : "Showing the captions exactly as sent (ALL CAPS). Click for easier-to-read sentence case.";
+  }
+
+  // ---------------------------------------------------------
   // Rendering + search
   // ---------------------------------------------------------
   function escapeHtml(s) {
@@ -540,7 +715,7 @@
   }
 
   function renderTranscript() {
-    const text = state.chars.join("");
+    const text = viewText(state.chars.join(""));
 
     updateEmptyStateVisibility();
 
@@ -706,7 +881,16 @@
           "",
         ].join("\n");
 
-    const blob = new Blob([header + state.chars.join("")], { type: "text/plain;charset=utf-8" });
+    // Download what's on screen. If sentence case actually changed anything,
+    // say so in the file, since the unconverted captions are in capitals.
+    const raw = state.chars.join("");
+    const body = viewText(raw);
+    const caseNote = body !== raw
+      ? "NOTE: Letter case was adjusted automatically for readability (the live captions\n" +
+        "are sent in capitals). Names the software could not recognise may appear in\n" +
+        "lower case.\n\n"
+      : "";
+    const blob = new Blob([header + caseNote + body], { type: "text/plain;charset=utf-8" });
     const filename = `hansard-live-${TEST_MODE ? "TEST-" : ""}${atlanticStampForFilename(now)}.txt`;
     const a = document.createElement("a");
     const url = URL.createObjectURL(blob);
@@ -716,6 +900,20 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  });
+
+  // ---------------------------------------------------------
+  // Letter-case toggle
+  // ---------------------------------------------------------
+  el.caseToggle.addEventListener("click", () => {
+    state.caseMode = state.caseMode === "sentence" ? "original" : "sentence";
+    try {
+      localStorage.setItem(CASE_KEY, state.caseMode);
+    } catch (err) {
+      /* storage unavailable — the choice just won't be remembered */
+    }
+    updateCaseToggleUI();
+    renderTranscript();
   });
 
   // ---------------------------------------------------------
@@ -832,6 +1030,7 @@
   });
 
   function init() {
+    loadCaseMode();
     loadLatestHansard();
     if (TEST_MODE) {
       startTestMode();
