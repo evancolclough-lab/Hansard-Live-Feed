@@ -1,6 +1,6 @@
 /* ===========================================================
    NS Hansard Live — client-side app
-   - Polls StreamText's public captions endpoint every 5s
+   - Polls StreamText's live text feed about once a second (see FEED_URL)
    - Reconstructs the transcript, honouring literal backspace
      (\x08) characters as "delete previous character"
    - Persists per-day progress in localStorage
@@ -18,12 +18,43 @@
   // Config
   // ---------------------------------------------------------
   const EVENT_NAME = "NSLegislature";
-  const CAPTIONS_URL = (last) =>
-    `https://www.streamtext.net/captions?event=${encodeURIComponent(EVENT_NAME)}&last=${last}&language=en`;
-  const POLL_INTERVAL_MS = 5000;
-  const IDLE_AFTER_MS = 75 * 1000; // no new content for this long -> show "not sitting" instead of a stale "LIVE"
+
+  // Which StreamText feed we read — and why it is NOT the one the original
+  // brief named. StreamText exposes two:
+  //   * /captions?...&language=en (the "documented" one) hands back the
+  //     backlog in tiny pages of roughly 10-35 characters per request. A
+  //     page opened mid-sitting — or any client that ever falls behind —
+  //     crawls through the backlog one poll at a time, and because a live
+  //     captioner types faster than that, it never catches up. That was
+  //     the "very delayed" bug: the site fell further behind all sitting.
+  //   * /text-data.ashx (the endpoint StreamText's own player uses) returns
+  //     every entry after `last` in ONE response, including the whole
+  //     day's backlog for last=0. Its cursor counts *entries* (the small
+  //     bursts the captioner's software sends), not characters, and each
+  //     entry's text is percent-encoded. last=-1 returns just the current
+  //     total with no entries, which we use as a cheap probe.
+  const FEED_URL = (last) =>
+    `https://www.streamtext.net/text-data.ashx?event=${encodeURIComponent(EVENT_NAME)}&last=${last}`;
+
+  // StreamText's own player polls every 500ms; we're a little gentler, and
+  // slow down when nothing is being captioned.
+  const POLL_LIVE_MS = 1000;
+  const POLL_IDLE_MS = 3000;          // no active event, or no new text lately
+  const POLL_ERROR_STEP_MS = 1000;    // errors back off linearly: 1s, 2s, 3s ...
+  const POLL_ERROR_MAX_MS = 10000;    // ... capped here (same shape as StreamText's player)
+  const POLL_TIMEOUT_MS = 10000;      // an ordinary poll that hangs is abandoned and retried
+  const BACKLOG_TIMEOUT_MS = 45000;   // the one-off full-backlog download gets longer
+  const PROBE_AFTER_MS = 30000;       // quiet this long before we double-check our cursor ...
+  const PROBE_EVERY_MS = 30000;       // ... and then at most this often
+  const HEAD_ENTRIES = 25;            // how many opening entries identify "which session is this"
+  const PERSIST_EVERY_MS = 5000;      // localStorage writes are throttled; see schedulePersist()
+  const IDLE_AFTER_MS = 75 * 1000;    // no new content for this long -> show "not sitting" instead of a stale "LIVE"
+  const SESSION_BREAK = "\n\n— — —  new session  — — —\n\n";
   const BACKSPACE = "\x08";
-  const STORAGE_PREFIX = "nsHansardLive:v1:";
+  // v2: the saved cursor changed meaning (characters -> entries) when the
+  // feed changed, so v1 saves must never be read back; see purgeLegacyStorage().
+  const STORAGE_PREFIX = "nsHansardLive:v2:";
+  const LEGACY_STORAGE_PREFIX = "nsHansardLive:v1:";
   const ATLANTIC_TZ = "America/Halifax";
   const REPO_URL = "https://github.com/evancolclough-lab/Hansard-Live-Feed";
 
@@ -79,7 +110,14 @@
   // ---------------------------------------------------------
   const state = {
     dateKey: null,          // Atlantic YYYY-MM-DD this transcript belongs to
-    lastPosition: 0,        // StreamText cursor
+    lastPosition: 0,        // StreamText cursor: how many feed entries of the current session we've consumed
+    head: [],               // raw text of the session's first HEAD_ENTRIES entries — fingerprint of "which session is this"
+    needsResync: true,      // next poll must verify our cursor against the full backlog (page load, or after "no event")
+    polling: false,         // a poll request is in flight (single-flight guard)
+    lastProbeAt: 0,
+    persistTimer: null,
+    persistDirty: false,
+    warnedFormats: false,
     chars: [],              // accumulated transcript, as an array of characters (fast push/pop for backspace handling)
     firstContentAt: null,   // ms epoch — when today's transcript first received text
     lastContentAt: null,    // ms epoch — last time new (non-empty) content arrived
@@ -91,7 +129,6 @@
     currentMatch: -1,
     pollTimer: null,
     firstPollDone: false,
-    firstRenderDone: false,
   };
 
   // ---------------------------------------------------------
@@ -128,7 +165,22 @@
     return STORAGE_PREFIX + dateKey;
   }
 
+  // Saves written by the old /captions-based version stored a *character*
+  // cursor. Reading one back as an *entry* cursor would be nonsense (and
+  // those saves hold an incomplete transcript anyway), so discard them.
+  function purgeLegacyStorage() {
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(LEGACY_STORAGE_PREFIX)) localStorage.removeItem(key);
+      }
+    } catch (err) {
+      /* storage unavailable — nothing to purge */
+    }
+  }
+
   function loadStateForToday() {
+    purgeLegacyStorage();
     const todayKey = atlanticDateKey(new Date());
     state.dateKey = todayKey;
     try {
@@ -138,6 +190,8 @@
         state.lastPosition = saved.lastPosition || 0;
         state.chars = saved.transcript ? Array.from(saved.transcript) : [];
         state.firstContentAt = saved.firstContentAt || null;
+        state.lastContentAt = saved.lastContentAt || null;
+        state.head = Array.isArray(saved.head) ? saved.head : [];
         return;
       }
     } catch (err) {
@@ -145,7 +199,9 @@
     }
     state.lastPosition = 0;
     state.chars = [];
+    state.head = [];
     state.firstContentAt = null;
+    state.lastContentAt = null;
   }
 
   function persist() {
@@ -154,8 +210,10 @@
         storageKey(state.dateKey),
         JSON.stringify({
           lastPosition: state.lastPosition,
+          head: state.head,
           transcript: state.chars.join(""),
           firstContentAt: state.firstContentAt,
+          lastContentAt: state.lastContentAt,
           savedAt: Date.now(),
         })
       );
@@ -165,18 +223,45 @@
     }
   }
 
+  // Polling now runs about once a second, and persist() serialises and
+  // synchronously writes the whole day's transcript, so writing on every
+  // update would burn time on the main thread for no benefit. Batch writes
+  // to once every few seconds, and flush when the tab is hidden or closed
+  // so nothing is lost. (Test mode never calls this, so it never writes.)
+  function schedulePersist() {
+    state.persistDirty = true;
+    if (state.persistTimer) return;
+    state.persistTimer = setTimeout(flushPersist, PERSIST_EVERY_MS);
+  }
+
+  function flushPersist() {
+    clearTimeout(state.persistTimer);
+    state.persistTimer = null;
+    if (!state.persistDirty) return;
+    state.persistDirty = false;
+    persist();
+  }
+
+  function resetTranscript() {
+    state.lastPosition = 0;
+    state.head = [];
+    state.chars = [];
+    state.firstContentAt = null;
+    state.lastContentAt = null;
+    state.matches = [];
+    state.currentMatch = -1;
+    state.needsResync = true;
+    renderTranscript();
+    persist();
+  }
+
   function checkForDayRollover() {
     const todayKey = atlanticDateKey(new Date());
     if (todayKey !== state.dateKey) {
-      // A new sitting day has begun — StreamText's "last" cursor resets with it.
+      // A new sitting day has begun — StreamText starts a fresh transcript
+      // (and cursor) with it.
       state.dateKey = todayKey;
-      state.lastPosition = 0;
-      state.chars = [];
-      state.firstContentAt = null;
-      state.matches = [];
-      state.currentMatch = -1;
-      renderTranscript();
-      persist();
+      resetTranscript();
     }
   }
 
@@ -202,57 +287,198 @@
 
   // ---------------------------------------------------------
   // Polling
+  //
+  // The cursor (state.lastPosition) is "how many feed entries of the
+  // current session we've consumed". A request with last=N returns every
+  // entry after the first N, plus the new total in lastPosition — so
+  // last=0 is the whole backlog in one response, and last=-1 is just the
+  // current total (a cheap probe). Two kinds of poll:
+  //   * resync()          — downloads the full backlog and reconciles it
+  //                         with what we already have. Runs on page load
+  //                         and after StreamText reports "no event".
+  //   * incrementalPoll() — the normal ~1s tick: just the new entries.
   // ---------------------------------------------------------
-  async function pollOnce() {
-    checkForDayRollover();
 
-    const isFirstPoll = !state.firstPollDone;
-    if (isFirstPoll && state.lastPosition === 0) {
-      el.loadingNotice.hidden = false;
+  // Entry text is percent-encoded, and "%08" is the captioner's backspace.
+  // Only "basic" (plain text) entries are used: the one stream we've seen
+  // sends nothing else, and mixing in another format (e.g. speech-recognition
+  // text) would corrupt the transcript.
+  function decodeEntries(entries) {
+    let out = "";
+    for (const entry of entries) {
+      if (!entry || typeof entry.d !== "string") continue;
+      if (entry.format && entry.format !== "basic") {
+        if (!state.warnedFormats) {
+          state.warnedFormats = true;
+          console.warn("Ignoring feed entries in unsupported format:", entry.format);
+        }
+        continue;
+      }
+      try {
+        out += decodeURIComponent(entry.d);
+      } catch (err) {
+        out += unescape(entry.d); // malformed %-sequence: keep what we can rather than drop the entry
+      }
     }
+    return out;
+  }
 
-    let data;
+  // One request to the feed. Resolves { status: 404 } when StreamText says
+  // there's no active event (an expected, non-error state — it's what every
+  // non-sitting day looks like), { status: 200, data } on success, and
+  // throws on anything else, including a timeout.
+  async function fetchFeed(last, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(CAPTIONS_URL(state.lastPosition), { cache: "no-store" });
-      // StreamText returns JSON even on a 404 ("event not found" / idle day),
-      // so we always try to parse the body rather than branching on status.
-      data = await res.json();
-    } catch (err) {
-      state.consecutiveErrors++;
-      if (state.consecutiveErrors >= 2) setConnection("error");
-      scheduleNextPoll();
-      return;
+      const res = await fetch(FEED_URL(last), { cache: "no-store", signal: controller.signal });
+      if (res.status === 404) return { status: 404, data: null };
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (!data || typeof data.lastPosition !== "number") throw new Error("Unexpected feed response");
+      return { status: 200, data };
+    } finally {
+      clearTimeout(timer);
     }
+  }
 
+  // Applies a batch of entries to the transcript and advances the cursor.
+  // `startIndex` is the absolute index of entries[0] within the session.
+  function consumeEntries(entries, startIndex, newCursor) {
+    for (let j = 0; j < entries.length; j++) {
+      const idx = startIndex + j;
+      const entry = entries[j];
+      // Remember the session's opening entries: resync() compares them to
+      // tell "same session, keep going" from "a different session".
+      if (idx < HEAD_ENTRIES && state.head.length === idx && entry && typeof entry.d === "string") {
+        state.head.push(entry.d);
+      }
+    }
+    const changed = applyChunk(decodeEntries(entries));
+    state.lastPosition = newCursor;
+    if (changed) {
+      if (!state.firstContentAt) state.firstContentAt = Date.now();
+      state.lastContentAt = Date.now();
+      schedulePersist();
+      renderTranscript();
+    }
+    return changed;
+  }
+
+  function markPollSucceeded() {
     state.consecutiveErrors = 0;
     state.firstPollDone = true;
     el.loadingNotice.hidden = true;
-
-    const gotValidCursor = typeof data.lastPosition === "number" && data.lastPosition >= 0;
-
-    if (gotValidCursor) {
-      if (data.content) {
-        const changed = applyChunk(data.content);
-        state.lastPosition = data.lastPosition;
-        if (changed) {
-          if (!state.firstContentAt) state.firstContentAt = Date.now();
-          state.lastContentAt = Date.now();
-          persist();
-          renderTranscript();
-        }
-        setConnection("live");
-      } else {
-        state.lastPosition = data.lastPosition;
-        evaluateIdleness();
-      }
-    } else {
-      // lastPosition -1 / missing => no such event right now => not sitting
-      evaluateIdleness(true);
-    }
-
     updateEmptyStateVisibility();
     el.lastUpdated.textContent = `Last checked: ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
-    scheduleNextPoll();
+  }
+
+  function nextDelay() {
+    return state.connection === "live" ? POLL_LIVE_MS : POLL_IDLE_MS;
+  }
+
+  // StreamText says no event is active — i.e. not sitting. When one comes
+  // back it may be a brand-new session whose numbering restarts from zero,
+  // so don't trust our cursor again until resync() has checked it.
+  function onNoEvent() {
+    state.needsResync = true;
+    markPollSucceeded();
+    evaluateIdleness(true);
+    return POLL_IDLE_MS;
+  }
+
+  async function resync() {
+    const { status, data } = await fetchFeed(0, BACKLOG_TIMEOUT_MS);
+    if (status === 404) return onNoEvent();
+
+    const entries = Array.isArray(data.i) ? data.i : [];
+
+    // Same session iff the backlog is at least as long as what we've
+    // consumed AND its opening entries match the ones we recorded. (A new
+    // session could in principle be longer than our cursor by now, which
+    // is why length alone isn't enough.)
+    const sameSession =
+      state.lastPosition > 0 &&
+      state.head.length > 0 &&
+      entries.length >= state.lastPosition &&
+      state.head.every((d, i) => entries[i] && entries[i].d === d);
+
+    let startIndex;
+    let fresh;
+    if (sameSession) {
+      startIndex = state.lastPosition;
+      fresh = entries.slice(startIndex);
+    } else {
+      // A different (or first) session. Keep any earlier session's text on
+      // the page, marked off with a divider, and take this one from the top.
+      if (state.chars.length > 0) {
+        applyChunk(SESSION_BREAK);
+        schedulePersist();
+        renderTranscript();
+      }
+      state.head = [];
+      startIndex = 0;
+      fresh = entries;
+    }
+
+    consumeEntries(fresh, startIndex, data.lastPosition);
+    state.needsResync = false;
+    markPollSucceeded();
+    if (fresh.length > 0) setConnection("live");
+    else evaluateIdleness();
+    return nextDelay();
+  }
+
+  async function incrementalPoll() {
+    const { status, data } = await fetchFeed(state.lastPosition, POLL_TIMEOUT_MS);
+    if (status === 404) return onNoEvent();
+
+    const entries = Array.isArray(data.i) ? data.i : [];
+    if (entries.length > 0) {
+      consumeEntries(entries, state.lastPosition, data.lastPosition);
+      markPollSucceeded();
+      setConnection("live");
+      return nextDelay();
+    }
+
+    markPollSucceeded();
+
+    // Nothing new. If it has been quiet a while, check that our cursor
+    // hasn't been left ahead of a stream that restarted: the server simply
+    // echoes back a cursor that's past its end, so without this check we'd
+    // wait silently for a session that already restarted behind us.
+    const now = Date.now();
+    if (now - (state.lastContentAt || 0) > PROBE_AFTER_MS && now - state.lastProbeAt > PROBE_EVERY_MS) {
+      state.lastProbeAt = now;
+      const probe = await fetchFeed(-1, POLL_TIMEOUT_MS);
+      if (probe.status === 404) return onNoEvent();
+      if (probe.data.lastPosition < state.lastPosition) {
+        state.needsResync = true;
+        return 0; // resync right away
+      }
+    }
+    evaluateIdleness();
+    return nextDelay();
+  }
+
+  async function pollOnce() {
+    if (state.polling) return; // already in flight (e.g. the tab just became visible mid-request)
+    state.polling = true;
+    clearTimeout(state.pollTimer);
+
+    let delay;
+    try {
+      checkForDayRollover();
+      if (!state.firstPollDone && state.chars.length === 0) el.loadingNotice.hidden = false;
+      delay = await (state.needsResync ? resync() : incrementalPoll());
+    } catch (err) {
+      state.consecutiveErrors++;
+      if (state.consecutiveErrors >= 2) setConnection("error");
+      delay = Math.min(POLL_ERROR_STEP_MS * state.consecutiveErrors, POLL_ERROR_MAX_MS);
+    } finally {
+      state.polling = false;
+    }
+    state.pollTimer = setTimeout(pollOnce, delay);
   }
 
   function evaluateIdleness(forceIdle) {
@@ -262,11 +488,6 @@
     }
     const quiet = !state.lastContentAt || (Date.now() - state.lastContentAt) > IDLE_AFTER_MS;
     setConnection(quiet ? "idle" : "live");
-  }
-
-  function scheduleNextPoll() {
-    clearTimeout(state.pollTimer);
-    state.pollTimer = setTimeout(pollOnce, POLL_INTERVAL_MS);
   }
 
   // ---------------------------------------------------------
@@ -319,12 +540,6 @@
   }
 
   function renderTranscript() {
-    // On the very first paint there's nothing to scroll to yet if the
-    // transcript is empty; once there is content (restored from
-    // localStorage, or freshly arrived), open scrolled to the latest text.
-    const hasContent = state.chars.length > 0;
-    const wasNearBottom = hasContent && (!state.firstRenderDone || isNearTranscriptBottom());
-    state.firstRenderDone = true;
     const text = state.chars.join("");
 
     updateEmptyStateVisibility();
@@ -351,7 +566,15 @@
       updateSearchCountUI();
     }
 
-    if (state.autoScroll && wasNearBottom) {
+    // Follow the live edge whenever the reader hasn't scrolled away from
+    // it. That intent lives in state.autoScroll, which only the box's own
+    // scroll events change (scroll up -> false, back to the bottom -> true).
+    // Deliberately NOT re-derived from geometry on every render: a window
+    // resize, or a phone's on-screen keyboard opening and closing, changes
+    // the box's height without any scroll event, and a "am I within 60px of
+    // the bottom right now?" check would then wrongly conclude the reader
+    // had left and quietly stop following for good.
+    if (state.chars.length > 0 && state.autoScroll) {
       scrollToLatest();
     } else {
       updateJumpButtonVisibility();
@@ -593,6 +816,21 @@
   // ---------------------------------------------------------
   // Init
   // ---------------------------------------------------------
+  // Browsers throttle timers in background tabs (sometimes to once a
+  // minute), which makes a tab you come back to look badly out of date.
+  // Poll the moment it becomes visible again instead of waiting out a
+  // throttled timer — and write any unsaved transcript to storage when it
+  // is hidden or closed, since writes are batched (see schedulePersist()).
+  // Real polling only: test mode neither polls StreamText nor persists.
+  document.addEventListener("visibilitychange", () => {
+    if (TEST_MODE) return;
+    if (document.visibilityState === "hidden") flushPersist();
+    else pollOnce();
+  });
+  window.addEventListener("pagehide", () => {
+    if (!TEST_MODE) flushPersist();
+  });
+
   function init() {
     loadLatestHansard();
     if (TEST_MODE) {
