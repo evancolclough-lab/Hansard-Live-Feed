@@ -312,6 +312,20 @@ Sheet row is skipped).
   appears) for as long as they stay there. It's driven by the reader's own
   scroll, not re-measured on every update, so resizing the window or a
   phone's keyboard opening can't silently turn it off.
+- **Letter case.** The captioner's software sends almost everything in
+  capitals (~99% of the words in a real session), which is tiring to read
+  for hours. The site shows a sentence-case rendering by default, with a
+  toolbar toggle ("Aa Sentence case" / "AA As captioned") that remembers
+  your choice. It is a view only: the stored transcript, and the daily
+  archive, keep the captions exactly as sent, and the `.txt` download
+  follows whatever view is on (adding a note when it was adjusted). It
+  can't *know* what's a name, so it lower-cases capitalised words and puts
+  capitals back for sentence starts, "I", a list of acronyms and place
+  names (`KEEP_UPPER` / `PROPER_CASE` in `assets/app.js` — extend them
+  freely), the name after Ms./Mr./Dr./Madam, and the names after "my name
+  is…" and "MLA for…". Words the captioner already sent in mixed case
+  (`DeCOSTE`, `MacGillivray`) are left alone. Other names will show in
+  lower case; the toggle is one click away when that matters.
 - **Search** does a plain case-insensitive substring scan (not regex) over
   the accumulated transcript, so special characters in a search query are
   never misinterpreted, and highlights/count/next-prev stay correct as new
