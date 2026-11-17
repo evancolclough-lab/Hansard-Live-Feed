@@ -2,12 +2,24 @@ name: Archive daily transcript
 
 on:
   schedule:
-    # 03:00 UTC daily. That's 23:00 AST (winter) / 00:00 ADT (summer)
-    # Atlantic time — comfortably after any realistic House sitting has
-    # risen for the day, in either DST state, without needing to compute
-    # DST here (the script itself resolves "today" against Atlantic time
-    # for the filename/date, independent of when this cron actually fires).
-    - cron: "0 3 * * *"
+    # Two runs a day, both safely before midnight Atlantic in either DST
+    # state — the script labels the file with the *Atlantic* calendar date
+    # at run time, and 03:00 UTC (the original choice) is 00:00 ADT in
+    # summer, which would have dated a sitting's transcript as the next day
+    # and may fall after StreamText has started a new day.
+    #
+    #   22:15 UTC = 18:15 ADT / 17:15 AST  — soon after a typical afternoon
+    #       sitting: a snapshot in case the feed vanishes once the
+    #       captioner disconnects (the feed only holds the current session)
+    #   02:15 UTC = 23:15 ADT / 22:15 AST  — the late run, to catch anything
+    #       said after the early one
+    #
+    # A later run replaces the day's file only if it actually finds content,
+    # so the early snapshot is never lost to an empty late run. (Minute :15
+    # rather than :00 so we don't push at the same instant as the
+    # */30 Hansard-PDF workflow.)
+    - cron: "15 22 * * *"
+    - cron: "15 2 * * *"
   workflow_dispatch: {} # allow manual runs from the Actions tab, e.g. to test
 
 permissions:
@@ -42,7 +54,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "transcripts/${{ steps.archive.outputs.date }}.txt"
+
+          # A later run the same day can find exactly what an earlier one
+          # did (or a manual re-run can), and `git commit` exits non-zero
+          # when there's nothing to commit — that must not fail the job.
+          if git diff --cached --quiet; then
+            echo "Transcript for ${{ steps.archive.outputs.date }} is unchanged — nothing to commit."
+            exit 0
+          fi
+
           git commit -m "chore: archive transcript for ${{ steps.archive.outputs.date }}"
+          # The Hansard-PDF workflow may have pushed since we checked out;
+          # rebase onto it rather than failing with a rejected push.
+          git pull --rebase origin main
           git push
 
       - name: Notify Google Sheet
